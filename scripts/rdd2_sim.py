@@ -10,6 +10,7 @@ import rclpy
 import rclpy.clock
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from sensor_msgs.msg import NavSatFix
 
 from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped, PoseStamped
 from geometry_msgs.msg import TwistWithCovarianceStamped, TwistStamped
@@ -41,6 +42,8 @@ class Simulator(Node):
         self.pub_twist = self.create_publisher(TwistStamped, "twist", 1)
         self.pub_path = self.create_publisher(Path, "path", 1)
         self.pub_imu = self.create_publisher(Imu, "imu", 1)
+        self.pub_gps = self.create_publisher(NavSatFix, "gps", 1)
+        self.pub_gps_local = self.create_publisher(PoseStamped, "gps_local", 1)
         self.tf_broadcaster = TransformBroadcaster(self)
         self.tf_static_broadcaster = StaticTransformBroadcaster(self)
 
@@ -117,6 +120,30 @@ class Simulator(Node):
         self.e0 = np.zeros(3, dtype=float)  # error for attitude rate loop
         self.de0 = np.zeros(3, dtype=float)  # deriv of att error (for lowpass)
 
+        
+        # GPS Init
+        self.last_gps = 0
+        self.y_gps_local = np.array([0, 0, 0])
+        self.gps_random_walk = np.array([0,0,0])
+
+        # Define GPS reference origin (West Lafayette, IN)
+        self.lat0 = 40.4237       # latitude [deg]
+        self.lon0 = -86.9212      # longitude [deg]
+        self.alt0 = 190.0         # altitude [m]
+        self.earth_radius = 6378137.0  # WGS84 radius [m]
+
+        # GPS reference origin (West Lafayette, IN)
+        self.lat0 = 40.4237       # latitude [deg]
+        self.lon0 = -86.9212      # longitude [deg]
+        self.alt0 = 190.0         # altitude [m]
+        self.earth_radius = 6378137.0  # WGS84 radius [m]
+
+        # Initialize current LLA values to reference
+        self.lat = self.lat0
+        self.lon = self.lon0
+        self.alt = self.alt0
+        self.lla = np.array([self.lat, self.lon, self.alt])
+        
         # estimator data
         self.use_estimator = True  # if false, will use sim state instead for control
         self.P = 1e-2 * np.array([1, 0, 0, 1, 0, 1], dtype=float)  # state covariance
@@ -174,7 +201,7 @@ class Simulator(Node):
         self.est_x = np.array(res, dtype=float).reshape(-1)
 
         X1, P1 = self.eqs["position_correction"](
-            self.est_x, self.y_gps_pos, self.dt, self.P_temp
+            self.est_x, self.lla, self.dt, self.P_temp
         )
 
         # print(X1)
@@ -567,10 +594,49 @@ class Simulator(Node):
         res["yf_gps_pos"] = self.model["g_gps_pos"](
             res["xf"], self.u, self.p, np.random.randn(3), self.dt
         )
+
+        if self.t-self.last_gps > 0.1: 
+            # GPS Position TODO: Hook up to random walk
+            res["yf_gps_pos"] = self.model["g_gps_pos"](
+                res["xf"], self.u, self.p, np.random.randn(3), self.dt
+            )
+            self.y_gps_pos = np.array(res["yf_gps_pos"]).reshape(-1)
+
+            # GPS local Position W/ Random walk
+            x_index = self.model["x_index"]
+            gps_noise_power = 0.0000001
+            gps_dt = 0.1
+            sigma_gps = np.sqrt(gps_noise_power / gps_dt)
+            tau_gps_random_walk = 10
+            self.last_gps = self.t
+            w_0 = sigma_gps * np.random.randn(3)
+            self.gps_random_walk = (self.gps_random_walk + w_0 * tau_gps_random_walk) * np.exp(-(1/tau_gps_random_walk) * gps_dt)
+
+            pos = np.array([self.x[x_index["position_op_w_0"]], 
+                self.x[x_index["position_op_w_1"]], 
+                self.x[x_index["position_op_w_2"]]])
+            
+            self.y_gps_local = pos + self.gps_random_walk + 0 * np.random.randn(3)
+
+            x_local = float(self.y_gps_local[0])  # East offset [m]
+            y_local = float(self.y_gps_local[1])  # North offset [m]
+            z_local = float(self.y_gps_local[2])  # Up offset [m]
+
+            d_lat = (y_local / self.earth_radius) * (180.0 / np.pi)
+            d_lon = (x_local / (self.earth_radius * np.cos(self.lat0 * np.pi / 180.0))) * (180.0 / np.pi)
+
+            self.lat = self.lat0 + d_lat
+            self.lon = self.lon0 + d_lon
+            self.alt = self.alt0 + z_local
+            self.lla = np.array([self.lat, self.lon, self.alt])
+            
+
         self.y_gyro = np.array(res["yf_gyro"]).reshape(-1)
         self.y_mag = np.array(res["yf_mag"]).reshape(-1)
         self.y_accel = np.array(res["yf_accel"]).reshape(-1)
         self.y_gps_pos = np.array(res["yf_gps_pos"]).reshape(-1)
+
+
         self.publish_state()
 
     def update_fake_estimator(self):
@@ -731,6 +797,38 @@ class Simulator(Node):
         msg_imu.linear_acceleration.z = self.y_accel[2]
         msg_imu.linear_acceleration_covariance = np.eye(3).reshape(-1)
         self.pub_imu.publish(msg_imu)
+
+        # ------------------------------------
+        # publish gps
+        # ------------------------------------
+        msg_gps = NavSatFix()
+
+        msg_gps = NavSatFix()
+        msg_gps.header.frame_id = "map"
+        msg_gps.header.stamp = msg_clock.clock
+
+        msg_gps.latitude = self.lat
+        msg_gps.longitude = self.lon
+        msg_gps.altitude = self.alt
+        msg_gps.position_covariance_type = NavSatFix.COVARIANCE_TYPE_UNKNOWN
+
+        self.pub_gps.publish(msg_gps)
+
+        # ------------------------------------
+        # publish gps_local
+        # ------------------------------------
+        msg_gps_local = PoseStamped()
+        msg_gps_local.header.frame_id = "map"
+        msg_gps_local.header.stamp = msg_clock.clock
+        msg_gps_local.pose.position.x = float(self.y_gps_local[0])
+        msg_gps_local.pose.position.y = float(self.y_gps_local[1])
+        msg_gps_local.pose.position.z = float(self.y_gps_local[2])
+        msg_gps_local.pose.orientation.w = 1.0
+        msg_gps_local.pose.orientation.x = 0.0
+        msg_gps_local.pose.orientation.y = 0.0
+        msg_gps_local.pose.orientation.z = 0.0
+        self.pub_gps_local.publish(msg_gps_local)
+
 
         # ------------------------------------
         # publish pose with covariance stamped

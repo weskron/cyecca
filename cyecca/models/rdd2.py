@@ -560,6 +560,21 @@ def derive_strapdown_ins_propagation():
 def derive_position_correction():
     ## Initilaizing measurments
     z = ca.SX.sym("gps", 3)
+
+    # Initial GPS location
+    lat0 = 40.4237       # latitude [deg]
+    lon0 = -86.9212      # longitude [deg]
+    alt0 = 190.0         # altitude [m]
+    earth_radius = 6378137.0  # WGS84 radius [m]
+
+    # Convert z to local tangent plane
+    x_local = (z[1] - lon0) * (np.pi / 180) * earth_radius * np.cos(lat0 * np.pi / 180)  # East
+    y_local = (z[0] - lat0) * (np.pi / 180) * earth_radius                              # North
+    z_local = z[2] - alt0                                                               # Up
+
+    z_local_plane = ca.vertcat(x_local, y_local, z_local)
+
+
     dt = ca.SX.sym("dt", 1)
     P = ca.SX.sym("P", 6, 6)
 
@@ -589,7 +604,7 @@ def derive_position_correction():
     K = P_s @ H.T @ ca.inv(y)
 
     # Update estimate w/ measurment
-    x_new = x0 + K @ (z - H @ x0)
+    x_new = x0 + K @ (z_local_plane - H @ x0)
 
     # Update the measurement uncertainty
     P_new = (np.eye(6) - (K @ H)) @ P_s
