@@ -604,7 +604,7 @@ class Simulator(Node):
 
             # GPS local Position W/ Random walk
             x_index = self.model["x_index"]
-            gps_noise_power = 0.0000001
+            gps_noise_power = 0.00000001
             gps_dt = 0.1
             sigma_gps = np.sqrt(gps_noise_power / gps_dt)
             tau_gps_random_walk = 10
